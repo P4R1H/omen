@@ -4,12 +4,19 @@ from discord.ext import commands, tasks
 #from discord.ext import tasks
 import os
 import ast
-from web import site
-from replit import db
+from dotenv import load_dotenv
+from pymongo import MongoClient
 
+
+load_dotenv()
 
 intents = discord.Intents.all()
 client = commands.Bot(command_prefix='!', intents=intents)
+prev_message_ids = [1233700897759035403, 1233700899587620874]
+mongoclient = MongoClient(os.getenv("URI"))
+db = mongoclient["Omen"]
+thanks_collection = db["Thanks"]
+
 
 async def insert_returns(body):
 	if isinstance(body[-1], ast.Expr):
@@ -31,8 +38,14 @@ async def on_ready():
     client.add_view(cpuroles())
     client.add_view(gpuroles())
     client.add_view(typeroles())
-    
+    sticky.start()
 
+@client.event
+async def on_command_error(ctx: commands.Context, error: commands.CommandError):
+    if isinstance(error, commands.CommandOnCooldown):
+        await ctx.send("This command is currently on cooldown.")
+    else:
+        raise error
 
 
 roledic = {"Ryzen 5" : 951474373049606245, "Ryzen 7" : 951474289708765214, "Ryzen 9" : 951474453957738496, "Intel i5" : 951474497532354623, "Intel i7" : 951474535931183104, "Intel i9" : 951474585860210728}
@@ -74,7 +87,7 @@ class cpuroles(discord.ui.View):
 
 
 
-gpuroledic = {"RTX 30XX" : 951494273658945566, "RTX 20XX" : 951494361256972308, "GTX 16XX" : 951494366592131223, "GTX 10XX" : 951494365392560149, "Radeon 6XXX" : 951494367640682556, "Radeon 5XXX" : 951494368601202778}
+gpuroledic = {"RTX 40XX": 1060192351110320270, "RTX 30XX" : 951494273658945566, "RTX 20XX" : 951494361256972308, "GTX 16XX" : 951494366592131223, "GTX 10XX" : 951494365392560149, "Radeon 6XXX" : 951494367640682556, "Radeon 5XXX" : 951494368601202778}
 
 
 
@@ -83,6 +96,7 @@ class gpuroles(discord.ui.View):
         super().__init__(timeout=None)
 
     @discord.ui.select(custom_id = "gpuroleselect", placeholder='Pick your GPU', min_values=1, max_values=1, options=[
+        discord.SelectOption(label = "RTX 40XX", description = 'ex:4060/4070/4090 (🤑)', emoji = '<:RTX:951493702784811018>'),
         discord.SelectOption(label='RTX 30XX', description='ex: 3060/3070ti/3080', emoji='<:RTX:951493702784811018>'),
         discord.SelectOption(label='RTX 20XX', description='ex: 2060/2070s/2080', emoji='<:RTX:951493702784811018>'),
         discord.SelectOption(label='GTX 16XX', description='ex: 1650/1660ti', emoji='<:GTX:951493807063584829>'),
@@ -154,29 +168,33 @@ class typeroles(discord.ui.View):
 
 @client.command(aliases= ['eval'])
 async def _eval(ctx, * , cmd):
-    if ctx.author.id not in [602569683543130113,743672901680627764,617021192011776000]:
-        return
-    fn_name = "_eval_expr"
-    cmd = cmd.strip("`py ")
-    cmd = cmd.strip("` ")
-    cmd = "\n".join(f"	{i}" for i in cmd.splitlines())
-    body = f"async def {fn_name}():\n{cmd}"
-    parsed = ast.parse(body)
-    body = parsed.body[0].body	
-    await insert_returns(body)
-    env = {
-        'client': ctx.bot,
-        'commands': commands,
-        'ctx': ctx,
-        '__import__': __import__
-    }
     try:
-        exec(compile(parsed, filename="<ast>", mode="exec"), env)
-        await eval(f"{fn_name}()", env)
-        await ctx.message.add_reaction("✅")
-    except Exception as e:
+        if ctx.author.id not in [539122128893509673,602569683543130113,743672901680627764,617021192011776000]:
+            return
+        fn_name = "_eval_expr"
+        cmd = cmd.strip("`py ")
+        cmd = cmd.strip("` ")
+        cmd = "\n".join(f"	{i}" for i in cmd.splitlines())
+        body = f"async def {fn_name}():\n{cmd}"
+        parsed = ast.parse(body)
+        body = parsed.body[0].body	
+        await insert_returns(body)
+        env = {
+            'client': ctx.bot,
+            'commands': commands,
+            'ctx': ctx,
+            '__import__': __import__
+        }
+        try:
+            exec(compile(parsed, filename="<ast>", mode="exec"), env)
+            await eval(f"{fn_name}()", env)
+            await ctx.message.add_reaction("✅")
+        except Exception as e:
+            await ctx.message.add_reaction("❌")
+            return await ctx.send(f"```{e.__class__.__name__}: {e}```")
+    except Exception as e2:
         await ctx.message.add_reaction("❌")
-        return await ctx.send(f"```{e.__class__.__name__}: {e}```")
+        return await ctx.send(f"```{e.__class__.__name__}: {e2}```")
 
 
 
@@ -205,17 +223,106 @@ async def setup3(ctx):
 
 
 
+#Thank & Leaderboard
+
+@client.slash_command(name="thank", guild_ids=[750760232954888363], description="Thank someone for helping you!")
+@commands.cooldown(1, 30, commands.BucketType.user)
+async def thank(ctx: discord.ApplicationContext, member: discord.Member):
+    if member.id == ctx.author.id:
+        await ctx.respond("Let's not give ourselves a pat on our own back.", ephemeral=True)
+        return
+
+    thanks_collection.update_one({"user_id": member.id}, {"$inc": {"thank_count": 1}}, upsert=True)
+    await ctx.respond(f"{member.mention} has been thanked!")
+
+@client.slash_command(name="leaderboard", guild_ids=[750760232954888363], description="View the most helpful people in the server.")
+async def leaderboard(ctx: discord.ApplicationContext):
+    top_users = thanks_collection.find().sort("thank_count", -1).limit(10)
+    
+    # Emojis for top 3 positions
+    rank_emojis = ["🥇", "🥈", "🥉"]
+    
+    # Prepare embed
+    embed = discord.Embed(title="Community Pillars 🏛️", description="", color=discord.Color.gold())
+    
+    leaderboard_lines = []
+
+    for i, user in enumerate(top_users, start=1):
+        user_id = user["user_id"]
+        thank_count = user["thank_count"]
+        member = ctx.guild.get_member(user_id)
+        username = f"<@{user_id}>" if member else f"User {user_id}"
+        
+        rank_display = rank_emojis[i - 1] if i <= 3 else f"{i}."
+        line = f"{rank_display} **{username}** - {thank_count} thanks"
+        leaderboard_lines.append(line)
+
+    # Check if the user is in the leaderboard and find their rank
+    user_data = thanks_collection.find_one({"user_id": ctx.author.id})
+    if user_data:
+        user_rank = thanks_collection.count_documents({"thank_count": {"$gt": user_data["thank_count"]}}) + 1
+        if user_rank > 10:
+            # Add ellipsis and show user's rank if outside top 10
+            leaderboard_lines.append("...\n")
+            leaderboard_lines.append(f"**{user_rank}. <@{ctx.author.id}>** - {user_data['thank_count']} thanks")
+        else:
+            # Bold the user's position if in the top 10
+            leaderboard_lines[user_rank] = f"**{leaderboard_lines[user_rank]}**"
+    else:
+        embed.set_footer(text="You haven't received any thanks yet.")
+
+    # Set the description with the collected lines
+    embed.description = "\n".join(leaderboard_lines)
+
+    await ctx.respond(embed=embed)
 
 
 
 
 
+#LOOPs
 
+@tasks.loop(hours=1)
+async def sticky():
+    global prev_message_ids
+    await client.wait_until_ready()
+    
+    ogh = client.get_channel(933772572565319751)
+    desk = client.get_channel(1100791424187908229)    
 
+    # Fetch messages in the channel
+    ogh_messages = await ogh.history(limit=100).flatten()
+    desk_messages = await desk.history(limit=100).flatten()
 
+    # Check if the first message is a sticky by the bot
+    ogh_sticky_exists = len(ogh_messages) > 0 and ogh_messages[0].author.id == 936903746145898536
+    desk_sticky_exists = len(desk_messages) > 0 and desk_messages[0].author.id == 936903746145898536
 
+    if not ogh_sticky_exists:
+        embed = discord.Embed(title="This is a feedback channel 😄", description="This channel is for discussions with HP about any suggestions/feedback/bugs you might have with **OMEN Gaming Hub**.\n\nFor troubleshooting, please visit <#810839857940660236>.", color=0xf5791f)
+        new_message1 = await ogh.send(embed=embed)
+        if prev_message_ids:
+            try:
+                old_message = await ogh.fetch_message(prev_message_ids[0])
+                await old_message.delete()
+            except discord.NotFound:
+                pass
+            prev_message_ids[0] = new_message1.id
+        else:
+            prev_message_ids.append(new_message1.id)
 
-
+    if not desk_sticky_exists:
+        embed2 = discord.Embed(title="This is a feedback channel 😄", description="This channel is for discussions with HP about any suggestions/feedback/bugs you might have with **OMEN Desktops**.\n\nFor troubleshooting, please visit <#810839857940660236>.", color=0xf5791f)
+        new_message2 = await desk.send(embed=embed2)
+        if prev_message_ids:
+            try:
+                old_message = await desk.fetch_message(prev_message_ids[1])
+                await old_message.delete()
+            except discord.NotFound:
+                pass
+            prev_message_ids[1] = new_message2.id
+        else:
+            prev_message_ids.append(new_message2.id)
 
 
 
@@ -267,7 +374,5 @@ async def embed(ctx):
 
 
 
-
-
-site()
 client.run(os.getenv("token"))
+
